@@ -1,6 +1,7 @@
-import pyodbc # 假設您使用 pyodbc
+import pyodbc
 
 def get_db_connection():
+    """建立並回傳一個新的資料庫連線。"""
     # 這裡放您的資料庫連線字串
     conn_str = 'DRIVER={ODBC Driver 17 for SQL Server};SERVER=DESKTOP-0O8RKB2;DATABASE=CURRIDATA;Trusted_Connection=yes;'
     return pyodbc.connect(conn_str)
@@ -19,7 +20,9 @@ class DatabaseCursor:
     def __exit__(self, exc_type, exc_value, traceback):
         if self.conn:
             self.cursor.close()
-            self.conn.commit()
+            # 只有在沒有錯誤發生時才提交變更
+            if exc_type is None:
+                self.conn.commit()
             self.conn.close()
 
 def execute_query(query, params=None):
@@ -30,8 +33,9 @@ def execute_query(query, params=None):
                 cursor.execute(query, params)
             else:
                 cursor.execute(query)
-            # 如果是 SELECT 查詢，則回傳結果
-            if query.strip().upper().startswith("SELECT"):
+            
+            # 如果是 SELECT 或 EXEC 查詢，則回傳結果
+            if query.strip().upper().startswith(("SELECT", "EXEC")):
                 columns = [column[0] for column in cursor.description]
                 result = [dict(zip(columns, row)) for row in cursor.fetchall()]
                 return result

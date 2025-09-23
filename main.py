@@ -1,7 +1,7 @@
 import pyodbc
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from database_helper import DatabaseCursor # 引入我們定義的上下文管理器
+from database_helper import DatabaseCursor, execute_query # 從 database_helper 匯入 execute_query
 
 # 初始化 FastAPI 應用
 app = FastAPI()
@@ -15,240 +15,180 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- API 端點 (整合所有功能) ---
+# --- API 端點 (已重構為使用 execute_query) ---
 
 # 1. 獲取 CLASSDEPTSHORT 的資料
 @app.get("/classdeptshort")
 async def get_class_depts():
-    try:
-        with DatabaseCursor() as cursor:
-            cursor.execute("SELECT CLASS, DEPTSHORT FROM CLASSDEPTSHORT")
-            columns = [column[0] for column in cursor.description]
-            data = [dict(zip(columns, row)) for row in cursor.fetchall()]
-        return data
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch class data: {e}")
+    data = execute_query("SELECT CLASS, DEPTSHORT FROM CLASSDEPTSHORT")
+    if data is None:
+        raise HTTPException(status_code=500, detail="Failed to fetch class data.")
+    return data
 
-# 2. 獲取 DEPLIST 的資料
+# 2. 獲取 DEPLIST 的資料 (直接從資料表)
 @app.get("/deptlist")
 async def get_deplist():
-    try:
-        with DatabaseCursor() as cursor:
-            cursor.execute(
-                "SELECT ID, DEPTSHORT, DEPT, COLLEGE, COLLEGESHORT, AGENT, AGENTEXT, AGENTEMAIL, CAGENT, CAGENTEXT, CAGENTEMAIL FROM DEPTLIST"
-            )
-            columns = [column[0] for column in cursor.description]
-            data = [dict(zip(columns, row)) for row in cursor.fetchall()]
-        return data
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch department list data: {e}")
+    query = "SELECT ID, DEPTSHORT, DEPT, COLLEGE, COLLEGESHORT, AGENT, AGENTEXT, AGENTEMAIL, CAGENT, CAGENTEXT, CAGENTEMAIL FROM DEPTLIST"
+    data = execute_query(query)
+    if data is None:
+        raise HTTPException(status_code=500, detail="Failed to fetch department list data.")
+    return data
 
 # 3. 呼叫 sp_GetAll 預存程序
 @app.get("/get_all_data")
 async def get_all_data():
-    try:
-        with DatabaseCursor() as cursor:
-            cursor.execute("EXEC sp_GetAll")
-            columns = [column[0] for column in cursor.description]
-            data = [dict(zip(columns, row)) for row in cursor.fetchall()]
-        return data
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch all data from stored procedure: {e}")
+    data = execute_query("EXEC sp_GetAll")
+    if data is None:
+        raise HTTPException(status_code=500, detail="Failed to fetch all data from stored procedure.")
+    return data
 
 # 4. 呼叫 sp_GetDataByClass 預存程序
 @app.get("/get_class_details/{class_name}")
 async def get_class_details(class_name: str):
-    try:
-        with DatabaseCursor() as cursor:
-            cursor.execute("EXEC sp_GetDataByClass ?", (class_name,))
-            columns = [column[0] for column in cursor.description]
-            data = [dict(zip(columns, row)) for row in cursor.fetchall()]
-        return data
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch class data: {e}")
+    data = execute_query("EXEC sp_GetDataByClass ?", (class_name,))
+    if data is None:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch class data for '{class_name}'.")
+    return data
 
 # 5. 呼叫 sp_GetDEPTLIST 預存程序
 @app.get("/get_deptlist")
-async def get_deptlist():
-    try:
-        with DatabaseCursor() as cursor:
-            cursor.execute("EXEC sp_GetDEPTLIST")
-            columns = [column[0] for column in cursor.description]
-            data = [dict(zip(columns, row)) for row in cursor.fetchall()]
-        return data
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch all data from stored procedure: {e}")
+async def get_deptlist_sp():
+    data = execute_query("EXEC sp_GetDEPTLIST")
+    if data is None:
+        raise HTTPException(status_code=500, detail="Failed to fetch department list from stored procedure.")
+    return data
 
 # 6. 新增系所 (Create)
 @app.post("/add_dept")
 async def add_dept(item: dict):
-    try:
-        with DatabaseCursor() as cursor:
-            required_fields = ["COLLEGE", "COLLEGESHORT", "DEPTSHORT", "DEPT", "STYPE", "AGENT", "AGENTEXT", "AGENTEMAIL", "CAGENT", "CAGENTEXT", "CAGENTEMAIL"]
-            if not all(field in item and item.get(field) for field in required_fields):
-                raise HTTPException(status_code=400, detail="Missing or empty value for one or more required fields.")
+    # 檢查 DEPT 是否已存在 (這裡仍然需要直接使用 cursor，因為這是一個 pre-check)
+    with DatabaseCursor() as cursor:
+        cursor.execute("SELECT COUNT(*) FROM DEPTLIST WHERE DEPT = ?", (item.get("DEPT"),))
+        if cursor.fetchone()[0] > 0:
+            raise HTTPException(status_code=409, detail=f"Department '{item.get('DEPT')}' already exists.")
 
-            # 檢查 DEPT 是否已存在
-            cursor.execute("SELECT COUNT(*) FROM DEPTLIST WHERE DEPT = ?", (item.get("DEPT"),))
-            if cursor.fetchone()[0] > 0:
-                raise HTTPException(status_code=409, detail=f"Department '{item.get('DEPT')}' already exists.")
-
-            sql = """
-                INSERT INTO DEPTLIST (
-                    COLLEGE, COLLEGESHORT, DEPTSHORT, DEPT, STYPE,
-                    AGENT, AGENTEXT, AGENTEMAIL, CAGENT, CAGENTEXT, CAGENTEMAIL
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """
-            values = (
-                item.get("COLLEGE"),
-                item.get("COLLEGESHORT"),
-                item.get("DEPTSHORT"),
-                item.get("DEPT"),
-                item.get("STYPE"),
-                item.get("AGENT"),
-                item.get("AGENTEXT"),
-                item.get("AGENTEMAIL"),
-                item.get("CAGENT"),
-                item.get("CAGENTEXT"),
-                item.get("CAGENTEMAIL")
-            )
-            
-            cursor.execute(sql, values)
-        
-        return {"message": "Department added successfully."}
-    except Exception as e:
-        if isinstance(e, HTTPException):
-            raise e
-        raise HTTPException(status_code=500, detail=f"Failed to add department: {e}")
+    # 執行實際的插入操作
+    sql = """
+        INSERT INTO DEPTLIST (
+            COLLEGE, COLLEGESHORT, DEPTSHORT, DEPT, STYPE,
+            AGENT, AGENTEXT, AGENTEMAIL, CAGENT, CAGENTEXT, CAGENTEMAIL
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """
+    values = (
+        item.get("COLLEGE"), item.get("COLLEGESHORT"), item.get("DEPTSHORT"),
+        item.get("DEPT"), item.get("STYPE"), item.get("AGENT"),
+        item.get("AGENTEXT"), item.get("AGENTEMAIL"), item.get("CAGENT"),
+        item.get("CAGENTEXT"), item.get("CAGENTEMAIL")
+    )
+    result = execute_query(sql, values)
+    
+    if result is None:
+        raise HTTPException(status_code=500, detail="Failed to add department.")
+    
+    return {"message": "Department added successfully."}
 
 # 7. 更新系所 (Update)
 @app.put("/update_dept")
 async def update_dept(item: dict):
-    try:
-        with DatabaseCursor() as cursor:
-            # 使用 ID 來識別要更新的資料
-            if "ID" not in item:
-                raise HTTPException(status_code=400, detail="ID field is required for update.")
+    if "ID" not in item:
+        raise HTTPException(status_code=400, detail="ID field is required for update.")
 
-            sql = """
-                UPDATE DEPTLIST SET
-                    COLLEGE = ?, COLLEGESHORT = ?, DEPTSHORT = ?, DEPT = ?, STYPE = ?,
-                    AGENT = ?, AGENTEXT = ?, AGENTEMAIL = ?, CAGENT = ?,
-                    CAGENTEXT = ?, CAGENTEMAIL = ?
-                WHERE ID = ?
-            """
-            values = (
-                item.get("COLLEGE"),
-                item.get("COLLEGESHORT"),
-                item.get("DEPTSHORT"),
-                item.get("DEPT"),
-                item.get("STYPE"),
-                item.get("AGENT"),
-                item.get("AGENTEXT"),
-                item.get("AGENTEMAIL"),
-                item.get("CAGENT"),
-                item.get("CAGENTEXT"),
-                item.get("CAGENTEMAIL"),
-                item.get("ID")  # 條件值使用 ID
-            )
+    sql = """
+        UPDATE DEPTLIST SET
+            COLLEGE = ?, COLLEGESHORT = ?, DEPTSHORT = ?, DEPT = ?, STYPE = ?,
+            AGENT = ?, AGENTEXT = ?, AGENTEMAIL = ?, CAGENT = ?,
+            CAGENTEXT = ?, CAGENTEMAIL = ?
+        WHERE ID = ?
+    """
+    values = (
+        item.get("COLLEGE"), item.get("COLLEGESHORT"), item.get("DEPTSHORT"),
+        item.get("DEPT"), item.get("STYPE"), item.get("AGENT"),
+        item.get("AGENTEXT"), item.get("AGENTEMAIL"), item.get("CAGENT"),
+        item.get("CAGENTEXT"), item.get("CAGENTEMAIL"), item.get("ID")
+    )
+    result = execute_query(sql, values)
 
-            cursor.execute(sql, values)
-            if cursor.rowcount == 0:
-                raise HTTPException(status_code=404, detail="Department not found.")
+    if result == 0:
+        raise HTTPException(status_code=404, detail="Department not found.")
+    
+    if result is None:
+        raise HTTPException(status_code=500, detail="Failed to update department.")
         
-        return {"message": "Department updated successfully."}
-    except Exception as e:
-        if isinstance(e, HTTPException):
-            raise e
-        raise HTTPException(status_code=500, detail=f"Failed to update department: {e}")
+    return {"message": "Department updated successfully."}
 
 # 8. 刪除系所 (Delete)
 @app.delete("/delete_dept/{dept_id}")
 async def delete_dept(dept_id: int):
-    try:
-        with DatabaseCursor() as cursor:
-            sql = "DELETE FROM DEPTLIST WHERE ID = ?"
-            cursor.execute(sql, (dept_id,))
-            if cursor.rowcount == 0:
-                raise HTTPException(status_code=404, detail="Department not found.")
-        return {"message": "Department deleted successfully."}
-    except Exception as e:
-        if isinstance(e, HTTPException):
-            raise e
-        raise HTTPException(status_code=500, detail=f"Failed to delete department: {e}")
+    sql = "DELETE FROM DEPTLIST WHERE ID = ?"
+    result = execute_query(sql, (dept_id,))
+    
+    if result == 0:
+        raise HTTPException(status_code=404, detail="Department not found.")
+        
+    if result is None:
+        raise HTTPException(status_code=500, detail="Failed to delete department.")
+        
+    return {"message": "Department deleted successfully."}
 
 # 9. 取得所有課務承辦人
 @app.get("/get_cagent")
 async def get_cagent():
-    try:
-        with DatabaseCursor() as cursor:
-            cursor.execute("SELECT * FROM CURRIAGENT")
-            rows = cursor.fetchall()
-            columns = [column[0] for column in cursor.description]
-            result = [dict(zip(columns, row)) for row in rows]
-        return result
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch curriculum agents: {e}")
+    data = execute_query("SELECT * FROM CURRIAGENT")
+    if data is None:
+        raise HTTPException(status_code=500, detail="Failed to fetch curriculum agents.")
+    return data
 
 # 10. 新增課務承辦人
 @app.post("/add_cagent")
 async def add_cagent(item: dict):
-    try:
-        with DatabaseCursor() as cursor:
-            required_fields = ["NAME", "EXT", "EMAIL"]
-            if not all(field in item and item.get(field) for field in required_fields):
-                raise HTTPException(status_code=400, detail="Missing or empty value for one or more required fields.")
+    required_fields = ["NAME", "EXT", "EMAIL"]
+    if not all(field in item and item.get(field) for field in required_fields):
+        raise HTTPException(status_code=400, detail="Missing or empty value for one or more required fields.")
 
-            sql = "INSERT INTO CURRIAGENT (NAME, EXT, EMAIL) VALUES (?, ?, ?)"
-            values = (item.get("NAME"), item.get("EXT"), item.get("EMAIL"))
-            cursor.execute(sql, values)
-        return {"message": "Curriculum agent added successfully."}
-    except Exception as e:
-        if isinstance(e, HTTPException):
-            raise e
-        raise HTTPException(status_code=500, detail=f"Failed to add curriculum agent: {e}")
+    sql = "INSERT INTO CURRIAGENT (NAME, EXT, EMAIL) VALUES (?, ?, ?)"
+    values = (item.get("NAME"), item.get("EXT"), item.get("EMAIL"))
+    result = execute_query(sql, values)
+    
+    if result is None:
+        raise HTTPException(status_code=500, detail="Failed to add curriculum agent.")
+        
+    return {"message": "Curriculum agent added successfully."}
 
 # 11. 更新課務承辦人
 @app.put("/update_cagent/{cagent_id}")
 async def update_cagent(cagent_id: int, item: dict):
-    try:
-        with DatabaseCursor() as cursor:
-            item_upper = {k.upper(): v for k, v in item.items()}
+    item_upper = {k.upper(): v for k, v in item.items()}
 
-            required_fields = ["NAME", "EXT", "EMAIL"]
-            if not all(field in item_upper and item_upper.get(field) for field in required_fields):
-                raise HTTPException(status_code=400, detail="Missing or empty value for one or more required fields.")
+    required_fields = ["NAME", "EXT", "EMAIL"]
+    if not all(field in item_upper and item_upper.get(field) for field in required_fields):
+        raise HTTPException(status_code=400, detail="Missing or empty value for one or more required fields.")
 
-            sql = "UPDATE CURRIAGENT SET NAME = ?, EXT = ?, EMAIL = ? WHERE ID = ?"
-            values = (item_upper.get("NAME"), item_upper.get("EXT"), item_upper.get("EMAIL"), cagent_id)
-            cursor.execute(sql, values)
-        return {"message": "Curriculum agent updated successfully."}
-    except Exception as e:
-        if isinstance(e, HTTPException):
-            raise e
-        raise HTTPException(status_code=500, detail=f"Failed to update curriculum agent: {e}")
+    sql = "UPDATE CURRIAGENT SET NAME = ?, EXT = ?, EMAIL = ? WHERE ID = ?"
+    values = (item_upper.get("NAME"), item_upper.get("EXT"), item_upper.get("EMAIL"), cagent_id)
+    result = execute_query(sql, values)
+    
+    if result is None:
+        raise HTTPException(status_code=500, detail="Failed to update curriculum agent.")
+        
+    return {"message": "Curriculum agent updated successfully."}
 
 # 12. 刪除課務承辦人
 @app.delete("/delete_cagent/{cagent_id}")
 async def delete_cagent(cagent_id: int):
-    try:
-        with DatabaseCursor() as cursor:
-            cursor.execute("DELETE FROM CURRIAGENT WHERE ID = ?", (cagent_id,))
-        return {"message": "Curriculum agent deleted successfully."}
-    except Exception as e:
-        if isinstance(e, HTTPException):
-            raise e
-        raise HTTPException(status_code=500, detail=f"Failed to delete curriculum agent: {e}")
+    result = execute_query("DELETE FROM CURRIAGENT WHERE ID = ?", (cagent_id,))
+
+    if result == 0:
+        raise HTTPException(status_code=404, detail="Curriculum agent not found.")
+
+    if result is None:
+        raise HTTPException(status_code=500, detail="Failed to delete curriculum agent.")
+
+    return {"message": "Curriculum agent deleted successfully."}
 
 # 13. 取得所有CLASSDEPTSHORT
-@app.get("/get_class_deptshort")
-async def get_cagent():
-    try:
-        with DatabaseCursor() as cursor:
-            cursor.execute("SELECT * FROM CLASSDEPTSHORT")
-            rows = cursor.fetchall()
-            columns = [column[0] for column in cursor.description]
-            result = [dict(zip(columns, row)) for row in rows]
-        return result
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch curriculum agents: {e}")
+@app.get("/get_class_deptshort_table")
+async def get_class_deptshort_table():
+    data = execute_query("SELECT * FROM CLASSDEPTSHORT")
+    if data is None:
+        raise HTTPException(status_code=500, detail="Failed to fetch class department short data.")
+    return data
