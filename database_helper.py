@@ -13,7 +13,7 @@ class UniqueConstraintError(DatabaseError):
 # 請將這裡的連接字串替換為您的實際資料庫連線資訊
 # 例如: 'DRIVER={ODBC Driver 17 for SQL Server};SERVER=your_server;DATABASE=your_db;UID=your_user;PWD=your_password'
 # 注意: 在 Windows 上，驅動程式名稱可能不同
-connection_string = 'DRIVER={ODBC Driver 17 for SQL Server};SERVER=localhost\\SQLEXPRESS;DATABASE=your_db;UID=your_user;PWD=your_password'
+connection_string = 'DRIVER={ODBC Driver 17 for SQL Server};SERVER=DESKTOP-0O8RKB2;DATABASE=CURRIDATA;Trusted_Connection=yes;'
 
 @contextmanager
 def DatabaseCursor():
