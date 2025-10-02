@@ -240,16 +240,15 @@ async def delete_cagent(cagent_id: int):
 
 
 # 9. 呼叫 sp_GetAll 預存程序 for ClassConverter
-@app.get("/get_all_data", summary="呼叫 sp_GetAll 預存程序")
+@app.get("/get_all_data")
 async def get_all_data():
     try:
         data = execute_query("EXEC sp_GetAll")
-        if data is None:
-            # 即使 sp_GetAll 執行成功但沒有回傳資料，也應該避免回傳 None
-            return []
-            
+        return data
     except DatabaseError as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch all data from stored procedure: {e}")
+
+
 
 # --- MAP_CLS_DEPT ---
 # 10. 查詢班級-系所簡稱對照表
