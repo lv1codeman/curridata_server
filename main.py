@@ -141,7 +141,7 @@ class MAP_CLS_DEPT(BaseModel):
 
 # --- 資料庫初始化函式 (確保 YT_DOWNLOAD_JOBS 表存在) ---
 def initialize_database():
-    print("檢查並初始化 YT_DOWNLOAD_JOBS 表...")
+    # print("檢查並初始化 YT_DOWNLOAD_JOBS 表...")
     # SQL Server specific syntax
     # 注意: final_filepath 設為 NVARCHAR(255) 應足夠容納臨時路徑
     sql = """
@@ -163,7 +163,7 @@ def initialize_database():
     try:
         # 使用同步執行
         execute_query(sql)
-        print("YT_DOWNLOAD_JOBS 表格準備就緒。")
+        # print("YT_DOWNLOAD_JOBS 表格準備就緒。")
     except Exception as e:
         # 這裡不應中斷應用程式，但必須警告使用者
         print(f"⚠️ 無法初始化 YT_DOWNLOAD_JOBS 表格，輪詢功能將無法運作: {e}")
@@ -634,3 +634,5 @@ async def delete_map_cls_dept(map_cls_dept_id: int):
         return {"message": "class-dept_short deleted successfully."}
     except DatabaseError as e:
         raise HTTPException(status_code=500, detail=f"Failed to delete class-dept_short: {e}")
+
+print(f"curridata_server已啟動，等候客戶端訪問中...")
