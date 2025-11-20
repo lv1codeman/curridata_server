@@ -5,23 +5,56 @@ import tempfile
 import os
 import shutil
 import uuid
-from urllib.parse import quote
+from urllib.parse import quote, unquote # 🎯 修正點：引入 unquote 來解碼檔案名
 import json 
 # 修正點：引入 asyncio 
 import asyncio
 from fastapi.responses import FileResponse
-from fastapi import FastAPI, HTTPException, Request, Response, Body, BackgroundTasks
+# 修正點：引入 File, UploadFile 來處理檔案上傳
+from fastapi import FastAPI, HTTPException, Request, Response, Body, BackgroundTasks, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.types import ASGIApp
 from pydantic import BaseModel
 from typing import List, Optional, Literal, Any, Dict
+# 🎯 新增：引入 pathlib 來處理路徑
+from pathlib import Path 
+
+# --- 🎯 新增的依賴：處理異步檔案操作 (推薦) ---
+import aiofiles 
 
 # 引入YT影片下載套件
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
+
+
+# --- 🎯 伺服器配置：Minecraft 存檔目標目錄 ---
+# 修正點：使用 Path 物件
+MINECRAFT_SAVE_DIR = Path("C:\\Users\\admin\\.minecraftx\\instances\\001\\saves")
+
+# --- 🎯 Minecraft 檔案管理輔助函式 (新增) ---
+
+def get_safe_path(filename: str) -> Path:
+    """
+    檢查檔案名是否安全，並返回相對於 MINECRAFT_SAVE_DIR 的完整 Path 物件。
+    會檢查路徑遍歷企圖 (e.g., '..', '/').
+    """
+    # 拒絕包含 '..' 或絕對路徑分隔符 (只允許單一層級的檔案名)
+    if ".." in filename or filename.startswith(('/', '\\')):
+        raise HTTPException(status_code=400, detail="無效的檔案名格式，不允許路徑操作。")
+        
+    full_path = MINECRAFT_SAVE_DIR / filename
+    
+    # 關鍵的安全檢查：確保最終路徑是真正位於 base directory 之下
+    # resolve() 處理符號連結並獲取絕對路徑
+    if not full_path.resolve().is_relative_to(MINECRAFT_SAVE_DIR.resolve()):
+        raise HTTPException(status_code=400, detail="路徑遍歷企圖被阻止。")
+        
+    return full_path
+
 # --- 檔案下載後清理的自定義 Response ---
+# ... (FinalCleanUpFileResponse 保持不變) ...
 class FinalCleanUpFileResponse(FileResponse):
     """
     擴展 FileResponse，在檔案發送完成後，嘗試刪除檔案及其臨時目錄。
@@ -35,25 +68,26 @@ class FinalCleanUpFileResponse(FileResponse):
             await super().__call__(scope, receive, send)
         finally:
             # 檔案傳輸完成後進行清理
-            file_to_remove = self.path
-            temp_dir = os.path.dirname(file_to_remove)
+            # 修正點：使用 Path 物件處理路徑
+            file_to_remove = Path(self.path)
+            temp_dir = file_to_remove.parent
             
             # 1. 嘗試刪除檔案本身
-            if os.path.exists(file_to_remove):
-                os.remove(file_to_remove)
+            if file_to_remove.exists():
+                file_to_remove.unlink() # 相當於 os.remove
                 print(f"🗑️ 已刪除下載文件: {file_to_remove}")
             
             # 2. 嘗試刪除臨時目錄 (如果它是空的)
-            if os.path.exists(temp_dir) and temp_dir != '/': # 確保不是根目錄
+            if temp_dir.exists() and temp_dir != Path('/'): 
                 try:
-                    # rmdir 只刪除空目錄
-                    os.rmdir(temp_dir) 
+                    temp_dir.rmdir() # 相當於 os.rmdir，只刪除空目錄
                     print(f"🗑️ 已刪除空臨時目錄: {temp_dir}")
                 except OSError:
                     # 如果目錄不為空，則忽略 rmdir 錯誤
                     pass
 
 # --- IP 獲取輔助函式 (針對代理環境優化) ---
+# ... (get_client_ip 保持不變) ...
 def get_client_ip(request: Request) -> str:
     """
     獲取客戶端 IP，優先檢查反向代理（如 ngrok）設定的標準標頭。
@@ -67,6 +101,7 @@ def get_client_ip(request: Request) -> str:
     return request.client.host if request.client else "Unknown"
 
 # --- 1. 定義 Custom Middleware (IP 監控) ---
+# ... (ClientIPMiddleware 保持不變) ...
 class ClientIPMiddleware(BaseHTTPMiddleware):
     """
     自定義中介軟體，用於記錄客戶端的 IP 位址、請求路徑和處理時間。
@@ -106,6 +141,10 @@ app.add_middleware(
 app.add_middleware(ClientIPMiddleware)
 
 # --- 資料模型 (Pydantic) ---
+class LoginRequest(BaseModel):
+    username: str 
+    password: str
+# ... (DownloadRequest, Dept, DeptWithAgent, CAgent, MAP_CLS_DEPT 保持不變) ...
 # YT下載請求模型
 class DownloadRequest(BaseModel):
     """定義客戶端傳入的請求體結構"""
@@ -139,7 +178,9 @@ class MAP_CLS_DEPT(BaseModel):
     CLASS: str
     DEPT_S: str
 
+
 # --- 資料庫初始化函式 (確保 YT_DOWNLOAD_JOBS 表存在) ---
+# ... (initialize_database 保持不變) ...
 def initialize_database():
     # print("檢查並初始化 YT_DOWNLOAD_JOBS 表...")
     # SQL Server specific syntax
@@ -172,6 +213,7 @@ def initialize_database():
 initialize_database()
 
 # --- 輪詢架構的背景任務執行函式 ---
+# ... (download_and_update_db 保持不變) ...
 def download_and_update_db(job_id: str, url: str, target_format: str):
     """
     實際執行 yt-dlp 下載和轉碼的背景任務。
@@ -309,7 +351,368 @@ def download_and_update_db(job_id: str, url: str, target_format: str):
         if temp_dir and os.path.exists(temp_dir):
             shutil.rmtree(temp_dir)
 
+
+# --- 🎯 Minecraft 存檔管理 API 端點 (新增/修正) ---
+
+# 1. 檔案列表端點
+@app.get("/api/list-saves", summary="獲取 Minecraft 存檔目錄下的第一層檔案與資料夾列表")
+async def list_saves():
+    """
+    列出 MINECRAFT_SAVE_DIR 目錄下的所有檔案和資料夾名稱。
+    此列表用於前端讓使用者選擇要下載的存檔。
+    """
+    try:
+        # 使用 Path.iterdir() 列出第一層內容
+        # p.name 自動獲取檔案或資料夾名稱
+        file_list = [p.name for p in MINECRAFT_SAVE_DIR.iterdir()]
+        print(f"✅ 成功列出存檔目錄內容：共 {len(file_list)} 個項目。")
+        return {"files": file_list}
+    except FileNotFoundError:
+        # 如果目錄不存在，返回空列表而不是 500 錯誤
+        print(f"⚠️ 存檔目錄不存在: {MINECRAFT_SAVE_DIR}")
+        return {"files": [], "message": "目標存檔目錄不存在或沒有檔案。"}
+    except Exception as e:
+        print(f"❌ 列出檔案失敗: {e}")
+        # 如果是權限問題或其他伺服器錯誤
+        raise HTTPException(status_code=500, detail="伺服器無法存取存檔目錄。")
+
+
+# 2. 檔案下載端點
+@app.get("/api/download-save/{filename}", summary="下載指定的 Minecraft 存檔或檔案")
+async def download_save(filename: str):
+    """
+    接收檔案名，執行安全檢查，並以串流方式返回檔案內容。
+    """
+    try:
+        # 1. 對 URL 編碼的檔案名進行解碼 (處理中文等)
+        decoded_filename = unquote(filename)
+        
+        # 2. 安全檢查：獲取安全的 Path 物件
+        safe_path = get_safe_path(decoded_filename)
+        
+        if not safe_path.exists():
+            raise HTTPException(status_code=404, detail="檔案未找到。")
+        
+        if not safe_path.is_file():
+            # 防止下載整個資料夾，但可以調整策略 (例如打包成 zip)
+            raise HTTPException(status_code=400, detail="請求的項目是資料夾，不支援直接下載資料夾。")
+            
+        # 3. 處理 Content-Disposition 標頭 (確保中文檔名正確)
+        original_filename = safe_path.name
+        ascii_filename = original_filename.encode('ascii', 'replace').decode('ascii')
+        quoted_filename_utf8 = quote(original_filename)
+
+        content_disposition_header = (
+            f'attachment; '
+            f'filename="{ascii_filename}"; ' # ASCII fallback
+            f"filename*=utf-8''{quoted_filename_utf8}" # UTF-8 規範名稱
+        )
+        
+        response_headers = {
+            'Content-Disposition': content_disposition_header,
+        }
+            
+        # 4. 返回 FileResponse 串流檔案
+        return FileResponse(
+            path=safe_path, 
+            headers=response_headers,
+            media_type='application/octet-stream' # 通用下載類型
+        )
+
+    except HTTPException:
+        # 重新拋出 HTTPException 讓 FastAPI 處理
+        raise
+    except Exception as e:
+        print(f"❌ 檔案下載失敗: {e}")
+        raise HTTPException(status_code=500, detail=f"伺服器處理下載失敗: {e}")
+
+
+# 3. 檔案上傳端點 (保持不變)
+@app.post("/api/upload-save", summary="上傳 Minecraft 存檔至伺服器指定路徑")
+async def upload_save(
+    file: UploadFile = File(..., description="要上傳的 Minecraft 存檔或檔案"),
+    req: Request = None
+):
+    """
+    接收前端發送的檔案，並將其儲存到 MINECRAFT_SAVE_DIR，同名檔案會被覆蓋。
+    檔案名稱將使用上傳時的原始檔案名稱。
+    """
+    print(f"收到上傳檔案請求...")
+    client_ip = get_client_ip(req)
+    
+    # 修正點：使用 Path 物件處理路徑
+    target_dir = MINECRAFT_SAVE_DIR
+    
+    # 1. 確保目標目錄存在
+    if not target_dir.exists():
+        try:
+            target_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            raise HTTPException(status_code=500, detail=f"伺服器錯誤: 無法創建目標目錄 {target_dir}. 錯誤: {e}")
+
+    # 2. 確定最終儲存路徑 (使用原始檔名，並自動覆蓋)
+    # file.filename 已經包含檔案名稱，如 "MyWorld.zip"
+    # 修正點：使用 Path 物件組合路徑
+    final_path = target_dir / file.filename 
+
+    print(f"Client IP: {client_ip} 正在上傳檔案: {file.filename} 到 {final_path}")
+
+    try:
+        # 3. 異步寫入檔案到目標路徑
+        async with aiofiles.open(final_path, 'wb') as out_file:
+            content = await file.read()
+            await out_file.write(content)
+        
+        print(f"✅ 檔案 {file.filename} 儲存成功，路徑: {final_path}")
+        
+        return {
+            "message": "檔案上傳成功並已儲存到目標目錄。",
+            "filename": file.filename,
+            "target_path": str(final_path), # 轉換回字串以便序列化
+            "overwrite_policy": "同名檔案已覆蓋"
+        }
+    except Exception as e:
+        print(f"❌ 檔案上傳/儲存失敗: {e}")
+        await file.close() 
+        raise HTTPException(status_code=500, detail=f"伺服器處理檔案失敗: {e}")
+    finally:
+        pass
+
+
+
+# --- 以下為不變動的既有 API 端點 ---
+
+# 測試GET功能
+# ... (get_test 保持不變) ...
+@app.get("/get_test", summary="測試GET")
+async def get_test():
+    print("get test成功")
+    return "伺服器端訪問成功。"
+# 測試POST功能
+# ... (post_test 保持不變) ...
+@app.post("/post_test", summary="測試POST")
+async def post_test(item: DownloadRequest):
+    print("url: ", item.url)
+    print("format: ", item.format)
+    
+    return "post成功囉"
+
+# --- DEPTS ---
+# 1. 讀取系所表(含承辦人及課務組承辦人資料)
+# ... (get_depts 保持不變) ...
+@app.get("/get_depts", summary="讀取所有系所資料及承辦人資訊")
+async def get_depts():
+    try:
+        sql = """
+SELECT
+    d.ID, COLLEGE, COLLEGE_S, DEPT, DEPT_S, STYPE, 
+    AGENT_NAME, AGENT_EXT, AGENT_EMAIL,
+    ca.ID as CAGENT_ID, ca.NAME as CAGENT_NAME, ca.EXT as CAGENT_EXT, ca.EMAIL as CAGENT_EMAIL
+FROM
+    DEPTS AS d
+LEFT JOIN
+    CAGENTS AS ca ON d.CAGENT_ID = ca.ID;
+"""
+        data = await asyncio.to_thread(execute_query, sql)
+        return data
+    except DatabaseError as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch departments: {e}")
+
+# 2. 新增系所到DEPTS(含承辦人及課務組承辦人資料)
+# ... (create_dept 保持不變) ...
+@app.post("/create_dept", summary="新增系所資料")
+async def create_dept(item: DeptWithAgent):
+    """
+    建立新的系所資料，使用標準 INSERT 語句，不回傳 ID。
+    """
+    sql = """
+        INSERT INTO DEPTS (COLLEGE, COLLEGE_S, DEPT, DEPT_S, STYPE, AGENT_NAME, AGENT_EXT, AGENT_EMAIL, CAGENT_ID)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+    """
+    values = (item.COLLEGE, item.COLLEGE_S, item.DEPT, item.DEPT_S, item.STYPE, item.AGENT_NAME, item.AGENT_EXT, item.AGENT_EMAIL, item.CAGENT_ID)
+    
+    try:
+        await asyncio.to_thread(execute_query, sql, values)
+        return {"message": "Department added successfully."}
+
+    except UniqueConstraintError as e:
+        raise HTTPException(status_code=409, detail=f"Failed to create department: 唯一約束衝突 (可能系所名稱或簡稱已存在)")
+    except DatabaseError as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create department: 資料庫錯誤: {e}")
+
+# 3. 修改dept資料
+# ... (update_dept 保持不變) ...
+@app.put("/update_dept/{dept_id}", summary="修改指定 ID 的系所資料")
+async def update_dept(dept_id: int, item: DeptWithAgent):
+    sql = """
+        UPDATE DEPTS SET
+        COLLEGE = ?, COLLEGE_S = ?, DEPT = ?, DEPT_S = ?, STYPE = ?, AGENT_NAME = ?, AGENT_EXT = ?, AGENT_EMAIL = ?, CAGENT_ID = ?
+        WHERE ID = ?
+    """
+    values = (item.COLLEGE, item.COLLEGE_S, item.DEPT, item.DEPT_S, item.STYPE, item.AGENT_NAME, item.AGENT_EXT, item.AGENT_EMAIL, item.CAGENT_ID, dept_id)
+    try:
+        # execute_query(sql, values) 返回的是受影響的行數
+        result = await asyncio.to_thread(execute_query, sql, values)
+        if result == 0:
+            raise HTTPException(status_code=404, detail=f"Department with ID {dept_id} not found.")
+        return {"message": "Department updated successfully."}
+    except UniqueConstraintError as e:
+        raise HTTPException(status_code=409, detail=f"Failed to update department: 唯一約束衝突")
+    except DatabaseError as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update department: {e}")
+
+# 4. 刪除dept
+# ... (delete_dept 保持不變) ...
+@app.delete("/delete_dept/{dept_id}", summary="刪除指定 ID 的系所資料")
+async def delete_dept(dept_id: int):
+    try:
+        # 確保參數以 tuple 形式傳遞
+        result = await asyncio.to_thread(execute_query, "DELETE FROM DEPTS WHERE ID = ?", (dept_id,))
+        if result == 0:
+            raise HTTPException(status_code=404, detail=f"Department with ID {dept_id} not found.")
+        return {"message": "Department deleted successfully."}
+    except DatabaseError as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete department: {e}")
+
+# --- CAGENTS ---
+# 5. 查詢課務組承辦人資料
+# ... (get_cagents 保持不變) ...
+@app.get("/get_cagents", summary="查詢所有課務組承辦人資料")
+async def get_cagents():
+    try:
+        sql = "SELECT * FROM CAGENTS"
+        data = await asyncio.to_thread(execute_query, sql)
+        return data
+    except DatabaseError as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch C Agents: {e}")
+
+# 6. 新增課務組承辦人CAGENTS (使用 CAgent)
+# ... (create_cagent 保持不變) ...
+@app.post("/create_cagent", summary="新增課務組承辦人資料")
+async def create_cagent(item: CAgent):
+    sql = """
+        INSERT INTO CAGENTS (NAME, EXT, EMAIL)
+        VALUES (?, ?, ?);
+    """
+    values = (item.NAME, item.EXT, item.EMAIL)
+    
+    try:
+        await asyncio.to_thread(execute_query, sql, values)
+        return {"message": "Curri agent added successfully."}
+
+    except UniqueConstraintError as e:
+        raise HTTPException(status_code=409, detail=f"Failed to create Curri agent: 唯一約束衝突 (可能姓名或 Email 已存在)")
+    except DatabaseError as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create Curri agent: 資料庫錯誤: {e}")
+
+# 7. 修改課務組承辦人 (使用 CAgent)
+# ... (update_cagent 保持不變) ...
+@app.put("/update_cagent/{cagent_id}", summary="修改指定 ID 的課務組承辦人資料")
+async def update_cagent(cagent_id: int, item: CAgent):
+    sql = """
+        UPDATE CAGENTS SET
+        NAME = ?, EXT = ?, EMAIL = ?
+        WHERE ID = ?
+    """
+    values = (item.NAME, item.EXT, item.EMAIL, cagent_id)
+    try:
+        result = await asyncio.to_thread(execute_query, sql, values)
+        if result == 0:
+            raise HTTPException(status_code=404, detail=f"Curri agent with ID {cagent_id} not found.")
+        return {"message": "Curri agent updated successfully."}
+    except UniqueConstraintError as e:
+        raise HTTPException(status_code=409, detail=f"Failed to update Curri agent: 唯一約束衝突")
+    except DatabaseError as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update Curri agent: {e}")
+
+# 8. 刪除課務組承辦人
+# ... (delete_cagent 保持不變) ...
+@app.delete("/delete_cagent/{cagent_id}", summary="刪除指定 ID 的課務組承辦人資料")
+async def delete_cagent(cagent_id: int):
+    try:
+        result = await asyncio.to_thread(execute_query, "DELETE FROM CAGENTS WHERE ID = ?", (cagent_id,))
+        if result == 0:
+            raise HTTPException(status_code=404, detail=f"Curri agent with ID {cagent_id} not found.")
+        return {"message": "Curri agent deleted successfully."}
+    except DatabaseError as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete Curri agent: {e}")
+
+
+# 9. 呼叫 sp_GetAll 預存程序 for ClassConverter
+# ... (get_all_data 保持不變) ...
+@app.get("/get_all_data")
+async def get_all_data():
+    try:
+        data = await asyncio.to_thread(execute_query, "EXEC sp_GetAll")
+        return data
+    except DatabaseError as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch all data from stored procedure: {e}")
+
+# --- MAP_CLS_DEPT ---
+# 10. 查詢班級-系所簡稱對照表
+# ... (get_map_cls_dept 保持不變) ...
+@app.get("/get_map_cls_dept", summary="查詢所有班級-系所簡稱對照資料")
+async def get_map_cls_dept():
+    try:
+        sql = "SELECT * FROM MAP_CLS_DEPT"
+        data = await asyncio.to_thread(execute_query, sql)
+        return data
+    except DatabaseError as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch class-dept mapping: {e}")
+
+# 11. 新增班級-系所簡稱
+# ... (create_map_cls_dept 保持不變) ...
+@app.post("/create_map_cls_dept", summary="新增班級-系所簡稱對照")
+async def create_map_cls_dept(item: MAP_CLS_DEPT):
+    sql = """
+        INSERT INTO MAP_CLS_DEPT (CLASS, DEPT_S)
+        VALUES (?, ?);
+    """
+    values = (item.CLASS, item.DEPT_S)
+    
+    try:
+        await asyncio.to_thread(execute_query, sql, values)
+        return {"message": "Class-dept_short added successfully."}
+
+    except UniqueConstraintError as e:
+        raise HTTPException(status_code=409, detail=f"Failed to create class-dept_short: 唯一約束衝突 (班級與簡稱組合可能已存在)")
+    except DatabaseError as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create class-dept_short: 資料庫錯誤: {e}")
+
+# 12. 修改班級-系所簡稱
+# ... (update_map_cls_dept 保持不變) ...
+@app.put("/update_map_cls_dept/{map_cls_dept_id}", summary="修改指定 ID 的班級-系所簡稱對照")
+async def update_map_cls_dept(map_cls_dept_id: int, item: MAP_CLS_DEPT): # 修正：這裡的 MAP_CLS_CLS_DEPT 應該是 MAP_CLS_DEPT
+    sql = """
+        UPDATE MAP_CLS_DEPT SET
+        CLASS = ?, DEPT_S = ?
+        WHERE ID = ?
+    """
+    values = (item.CLASS, item.DEPT_S, map_cls_dept_id)
+    try:
+        result = await asyncio.to_thread(execute_query, sql, values)
+        if result == 0:
+            raise HTTPException(status_code=404, detail=f"Class-dept_short with ID {map_cls_dept_id} not found.")
+        return {"message": "class-dept_short updated successfully."}
+    except UniqueConstraintError as e:
+        raise HTTPException(status_code=409, detail=f"Failed to update class-dept_short: 唯一約束衝突")
+    except DatabaseError as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update class-dept_short: {e}")
+
+# 13. 刪除班級-系所簡稱
+# ... (delete_map_cls_dept 保持不變) ...
+@app.delete("/delete_map_cls_dept/{map_cls_dept_id}", summary="刪除指定 ID 的班級-系所簡稱對照")
+async def delete_map_cls_dept(map_cls_dept_id: int):
+    try:
+        result = await asyncio.to_thread(execute_query, "DELETE FROM MAP_CLS_DEPT WHERE ID = ?", (map_cls_dept_id,))
+        if result == 0:
+            raise HTTPException(status_code=404, detail=f"Class-dept_short with ID {map_cls_dept_id} not found.")
+        return {"message": "class-dept_short deleted successfully."}
+    except DatabaseError as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete class-dept_short: {e}")
+
 # --- 輪詢架構 API 端點 (取代 /download 與 /download_final) ---
+# ... (submit_download_job, get_download_status, download_file 保持不變) ...
 
 # 14. 提交 YouTube 下載任務
 @app.post("/submit_download_job", summary="提交 YouTube 下載任務 (非同步輪詢第一步)")
@@ -419,220 +822,77 @@ async def download_file(job_id: str):
         media_type="application/octet-stream" # 這是通用下載類型
     )
 
-# --- 以下為不變動的既有 API 端點 ---
 
-# 測試GET功能
-@app.get("/get_test", summary="測試GET")
-async def get_test():
-    print("get test成功")
-    return "get test 成功了"
-# 測試POST功能
-@app.post("/post_test", summary="測試POST")
-async def post_test(item: DownloadRequest):
-    print("url: ", item.url)
-    print("format: ", item.format)
-    
-    return "post成功囉"
-
-# --- DEPTS ---
-# 1. 讀取系所表(含承辦人及課務組承辦人資料)
-@app.get("/get_depts", summary="讀取所有系所資料及承辦人資訊")
-async def get_depts():
+# 17. 查詢 MEMBERS 表所有資料
+@app.get("/api/members", summary="查詢 MEMBERS 表所有資料")
+async def get_members():
+    """
+    從 MEMBERS 表中讀取所有欄位資料，並以 JSON 格式回傳給客戶端。
+    """
     try:
-        sql = """
-SELECT
-    d.ID, COLLEGE, COLLEGE_S, DEPT, DEPT_S, STYPE, 
-    AGENT_NAME, AGENT_EXT, AGENT_EMAIL,
-    ca.ID as CAGENT_ID, ca.NAME as CAGENT_NAME, ca.EXT as CAGENT_EXT, ca.EMAIL as CAGENT_EMAIL
-FROM
-    DEPTS AS d
-LEFT JOIN
-    CAGENTS AS ca ON d.CAGENT_ID = ca.ID;
-"""
+        # 假設您的 MEMBERS 表已經存在
+        sql = "SELECT * FROM MEMBERS"
+        
+        # 由於 execute_query 是同步函數，我們使用 asyncio.to_thread 確保它不會阻塞 FastAPI 的主事件迴圈
         data = await asyncio.to_thread(execute_query, sql)
+        
+        # execute_query 預期返回一個包含字典的列表，FastAPI 會將其自動序列化為 JSON
         return data
+        
     except DatabaseError as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch departments: {e}")
+        # 如果發生任何資料庫錯誤 (例如表不存在、連線問題等)
+        print(f"❌ 查詢 MEMBERS 表失敗: {e}")
+        raise HTTPException(status_code=500, detail=f"伺服器錯誤: 無法查詢 MEMBERS 表資料。")
+    except Exception as e:
+        # 捕捉其他未預期的錯誤
+        print(f"❌ 查詢 MEMBERS 表發生未知錯誤: {e}")
+        raise HTTPException(status_code=500, detail=f"伺服器錯誤: {e}")
 
-# 2. 新增系所到DEPTS(含承辦人及課務組承辦人資料)
-@app.post("/create_dept", summary="新增系所資料")
-async def create_dept(item: DeptWithAgent):
+# ... (在 get_members 之前或之後新增)
+
+# 18. 使用者登入 (已更新為 user_login)
+@app.post("/api/user_login", summary="使用者登入 (根據 ACCOUNT 及 PWD 驗證)")
+async def user_login(request: LoginRequest):
     """
-    建立新的系所資料，使用標準 INSERT 語句，不回傳 ID。
+    根據傳入的帳號 (對應 MEMBERS.ACCOUNT) 和密碼 (對應 MEMBERS.PWD) 驗證使用者身份，
+    並回傳使用者的 NAME 和 AUTH 權限資訊。
+    注意：此處僅為示範，實際應用需加密比對密碼。
     """
-    sql = """
-        INSERT INTO DEPTS (COLLEGE, COLLEGE_S, DEPT, DEPT_S, STYPE, AGENT_NAME, AGENT_EXT, AGENT_EMAIL, CAGENT_ID)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
-    """
-    values = (item.COLLEGE, item.COLLEGE_S, item.DEPT, item.DEPT_S, item.STYPE, item.AGENT_NAME, item.AGENT_EXT, item.AGENT_EMAIL, item.CAGENT_ID)
-    
     try:
-        await asyncio.to_thread(execute_query, sql, values)
-        return {"message": "Department added successfully."}
-
-    except UniqueConstraintError as e:
-        raise HTTPException(status_code=409, detail=f"Failed to create department: 唯一約束衝突 (可能系所名稱或簡稱已存在)")
+        # 🎯 關鍵修改：SQL 使用 ACCOUNT 和 PWD 欄位進行驗證
+        # 回傳欄位為 NAME 和 AUTH
+        sql = "SELECT NAME, AUTH FROM MEMBERS WHERE ACCOUNT = ? AND PWD = ?"
+        
+        # 由於前端傳入的 key 是 username 和 password，我們將其對應到 ACCOUNT 和 PWD
+        user_data = await asyncio.to_thread(
+            execute_query, 
+            sql, 
+            (request.username, request.password), 
+            fetch_one=True
+        )
+        
+        if user_data:
+            # 登入成功，回傳 NAME 和 AUTH
+            return {
+                "message": "登入成功",
+                "user": {
+                    # 🎯 欄位對應：NAME 作為顯示名稱
+                    "name": user_data['NAME'],
+                    # 🎯 欄位對應：AUTH 作為權限標識
+                    "auth": user_data['AUTH'],
+                    # 額外回傳登入帳號，方便前端顯示
+                    "username": request.username 
+                }
+            }
+        else:
+            # 登入失敗
+            raise HTTPException(status_code=401, detail="帳號或密碼錯誤。")
+            
     except DatabaseError as e:
-        raise HTTPException(status_code=500, detail=f"Failed to create department: 資料庫錯誤: {e}")
-
-# 3. 修改dept資料
-@app.put("/update_dept/{dept_id}", summary="修改指定 ID 的系所資料")
-async def update_dept(dept_id: int, item: DeptWithAgent):
-    sql = """
-        UPDATE DEPTS SET
-        COLLEGE = ?, COLLEGE_S = ?, DEPT = ?, DEPT_S = ?, STYPE = ?, AGENT_NAME = ?, AGENT_EXT = ?, AGENT_EMAIL = ?, CAGENT_ID = ?
-        WHERE ID = ?
-    """
-    values = (item.COLLEGE, item.COLLEGE_S, item.DEPT, item.DEPT_S, item.STYPE, item.AGENT_NAME, item.AGENT_EXT, item.AGENT_EMAIL, item.CAGENT_ID, dept_id)
-    try:
-        # execute_query(sql, values) 返回的是受影響的行數
-        result = await asyncio.to_thread(execute_query, sql, values)
-        if result == 0:
-            raise HTTPException(status_code=404, detail=f"Department with ID {dept_id} not found.")
-        return {"message": "Department updated successfully."}
-    except UniqueConstraintError as e:
-        raise HTTPException(status_code=409, detail=f"Failed to update department: 唯一約束衝突")
-    except DatabaseError as e:
-        raise HTTPException(status_code=500, detail=f"Failed to update department: {e}")
-
-# 4. 刪除dept
-@app.delete("/delete_dept/{dept_id}", summary="刪除指定 ID 的系所資料")
-async def delete_dept(dept_id: int):
-    try:
-        # 確保參數以 tuple 形式傳遞
-        result = await asyncio.to_thread(execute_query, "DELETE FROM DEPTS WHERE ID = ?", (dept_id,))
-        if result == 0:
-            raise HTTPException(status_code=404, detail=f"Department with ID {dept_id} not found.")
-        return {"message": "Department deleted successfully."}
-    except DatabaseError as e:
-        raise HTTPException(status_code=500, detail=f"Failed to delete department: {e}")
-
-# --- CAGENTS ---
-# 5. 查詢課務組承辦人資料
-@app.get("/get_cagents", summary="查詢所有課務組承辦人資料")
-async def get_cagents():
-    try:
-        sql = "SELECT * FROM CAGENTS"
-        data = await asyncio.to_thread(execute_query, sql)
-        return data
-    except DatabaseError as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch C Agents: {e}")
-
-# 6. 新增課務組承辦人CAGENTS (使用 CAgent)
-@app.post("/create_cagent", summary="新增課務組承辦人資料")
-async def create_cagent(item: CAgent):
-    sql = """
-        INSERT INTO CAGENTS (NAME, EXT, EMAIL)
-        VALUES (?, ?, ?);
-    """
-    values = (item.NAME, item.EXT, item.EMAIL)
-    
-    try:
-        await asyncio.to_thread(execute_query, sql, values)
-        return {"message": "Curri agent added successfully."}
-
-    except UniqueConstraintError as e:
-        raise HTTPException(status_code=409, detail=f"Failed to create Curri agent: 唯一約束衝突 (可能姓名或 Email 已存在)")
-    except DatabaseError as e:
-        raise HTTPException(status_code=500, detail=f"Failed to create Curri agent: 資料庫錯誤: {e}")
-
-# 7. 修改課務組承辦人 (使用 CAgent)
-@app.put("/update_cagent/{cagent_id}", summary="修改指定 ID 的課務組承辦人資料")
-async def update_cagent(cagent_id: int, item: CAgent):
-    sql = """
-        UPDATE CAGENTS SET
-        NAME = ?, EXT = ?, EMAIL = ?
-        WHERE ID = ?
-    """
-    values = (item.NAME, item.EXT, item.EMAIL, cagent_id)
-    try:
-        result = await asyncio.to_thread(execute_query, sql, values)
-        if result == 0:
-            raise HTTPException(status_code=404, detail=f"Curri agent with ID {cagent_id} not found.")
-        return {"message": "Curri agent updated successfully."}
-    except UniqueConstraintError as e:
-        raise HTTPException(status_code=409, detail=f"Failed to update Curri agent: 唯一約束衝突")
-    except DatabaseError as e:
-        raise HTTPException(status_code=500, detail=f"Failed to update Curri agent: {e}")
-
-# 8. 刪除課務組承辦人
-@app.delete("/delete_cagent/{cagent_id}", summary="刪除指定 ID 的課務組承辦人資料")
-async def delete_cagent(cagent_id: int):
-    try:
-        result = await asyncio.to_thread(execute_query, "DELETE FROM CAGENTS WHERE ID = ?", (cagent_id,))
-        if result == 0:
-            raise HTTPException(status_code=404, detail=f"Curri agent with ID {cagent_id} not found.")
-        return {"message": "Curri agent deleted successfully."}
-    except DatabaseError as e:
-        raise HTTPException(status_code=500, detail=f"Failed to delete Curri agent: {e}")
-
-
-# 9. 呼叫 sp_GetAll 預存程序 for ClassConverter
-@app.get("/get_all_data")
-async def get_all_data():
-    try:
-        data = await asyncio.to_thread(execute_query, "EXEC sp_GetAll")
-        return data
-    except DatabaseError as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch all data from stored procedure: {e}")
-
-# --- MAP_CLS_DEPT ---
-# 10. 查詢班級-系所簡稱對照表
-@app.get("/get_map_cls_dept", summary="查詢所有班級-系所簡稱對照資料")
-async def get_map_cls_dept():
-    try:
-        sql = "SELECT * FROM MAP_CLS_DEPT"
-        data = await asyncio.to_thread(execute_query, sql)
-        return data
-    except DatabaseError as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch class-dept mapping: {e}")
-
-# 11. 新增班級-系所簡稱
-@app.post("/create_map_cls_dept", summary="新增班級-系所簡稱對照")
-async def create_map_cls_dept(item: MAP_CLS_DEPT):
-    sql = """
-        INSERT INTO MAP_CLS_DEPT (CLASS, DEPT_S)
-        VALUES (?, ?);
-    """
-    values = (item.CLASS, item.DEPT_S)
-    
-    try:
-        await asyncio.to_thread(execute_query, sql, values)
-        return {"message": "Class-dept_short added successfully."}
-
-    except UniqueConstraintError as e:
-        raise HTTPException(status_code=409, detail=f"Failed to create class-dept_short: 唯一約束衝突 (班級與簡稱組合可能已存在)")
-    except DatabaseError as e:
-        raise HTTPException(status_code=500, detail=f"Failed to create class-dept_short: 資料庫錯誤: {e}")
-
-# 12. 修改班級-系所簡稱
-@app.put("/update_map_cls_dept/{map_cls_dept_id}", summary="修改指定 ID 的班級-系所簡稱對照")
-async def update_map_cls_dept(map_cls_dept_id: int, item: MAP_CLS_DEPT): # 修正：這裡的 MAP_CLS_CLS_DEPT 應該是 MAP_CLS_DEPT
-    sql = """
-        UPDATE MAP_CLS_DEPT SET
-        CLASS = ?, DEPT_S = ?
-        WHERE ID = ?
-    """
-    values = (item.CLASS, item.DEPT_S, map_cls_dept_id)
-    try:
-        result = await asyncio.to_thread(execute_query, sql, values)
-        if result == 0:
-            raise HTTPException(status_code=404, detail=f"Class-dept_short with ID {map_cls_dept_id} not found.")
-        return {"message": "class-dept_short updated successfully."}
-    except UniqueConstraintError as e:
-        raise HTTPException(status_code=409, detail=f"Failed to update class-dept_short: 唯一約束衝突")
-    except DatabaseError as e:
-        raise HTTPException(status_code=500, detail=f"Failed to update class-dept_short: {e}")
-
-# 13. 刪除班級-系所簡稱
-@app.delete("/delete_map_cls_dept/{map_cls_dept_id}", summary="刪除指定 ID 的班級-系所簡稱對照")
-async def delete_map_cls_dept(map_cls_dept_id: int):
-    try:
-        result = await asyncio.to_thread(execute_query, "DELETE FROM MAP_CLS_DEPT WHERE ID = ?", (map_cls_dept_id,))
-        if result == 0:
-            raise HTTPException(status_code=404, detail=f"Class-dept_short with ID {map_cls_dept_id} not found.")
-        return {"message": "class-dept_short deleted successfully."}
-    except DatabaseError as e:
-        raise HTTPException(status_code=500, detail=f"Failed to delete class-dept_short: {e}")
+        print(f"❌ 登入查詢資料庫失敗: {e}")
+        raise HTTPException(status_code=500, detail="伺服器錯誤: 資料庫連線失敗。")
+    except KeyError as e:
+        print(f"❌ 登入查詢結果缺少預期欄位: {e}")
+        raise HTTPException(status_code=500, detail="伺服器錯誤: 資料庫查詢結果欄位不正確。")
 
 print(f"curridata_server已啟動，等候客戶端訪問中...")
